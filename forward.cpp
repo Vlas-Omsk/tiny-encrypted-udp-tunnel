@@ -1,19 +1,22 @@
-#include<stdio.h>
-#include<string.h>
-#include<sys/socket.h>
-#include<arpa/inet.h>
-#include<stdlib.h>
-#include<getopt.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <getopt.h>
 #include <unistd.h>
-#include<errno.h>
+#include <errno.h>
 #include <fcntl.h>
-//#include"aes.h"
 #include <sys/epoll.h>
 #include <sys/wait.h>
-#include<signal.h>
-#include<map>
-#include<string>
-#include<vector>
+#include <signal.h>
+#include <sys/types.h>
+#include <netdb.h>
+#include <ctype.h>
+#include <map>
+#include <string>
+#include <vector>
+
 using namespace std;
 
 map<string, string> mp;
@@ -42,6 +45,7 @@ void encrypt(char * input, int len, char *key) {
 		input[i] ^= key[j];
 	}
 }
+
 void decrypt(char * input, int len, char *key) {
 	int i, j;
 	for (i = 0, j = 0; i < len; i++, j++) {
@@ -79,7 +83,7 @@ int resolve_addr(const char* addr, int port, struct sockaddr_storage* ss, sockle
 	snprintf(portstr, sizeof(portstr), "%d", port);
 	int r = getaddrinfo(addr, portstr, &hints, &res);
 	if (r != 0) {
-		fprintf(stderr, "getaddrinfo failed for %s:%d: %s\n", addr, port, gai_strerror(r));
+		fprintf(stderr, "getaddrinfo failed for %s:%d %s\n", addr, port, gai_strerror(r));
 		return -1;
 	}
 	memcpy(ss, res->ai_addr, res->ai_addrlen);
@@ -87,6 +91,43 @@ int resolve_addr(const char* addr, int port, struct sockaddr_storage* ss, sockle
 	if (family) *family = res->ai_family;
 	freeaddrinfo(res);
 	return 0;
+}
+
+int parse_addr_port(const char* input, char* address, size_t address_size, int* port) {
+    *port = -1;
+    if (!input || !address || address_size == 0) return -1;
+
+    // Handle [IPv6]:port syntax first
+    if (input[0] == '[') {
+        const char* end = strchr(input, ']');
+        if (!end) return -1; // Malformed
+        size_t len = end - (input + 1);
+        if (len >= address_size) return -1;
+        strncpy(address, input + 1, len);
+        address[len] = '\0';
+        if (end[1] == ':' && end[2]) {
+            *port = atoi(end + 2);
+        }
+        return 0;
+    }
+
+    // Find last ':' for port separation, but only if there are digits after
+    const char* last_colon = strrchr(input, ':');
+    if (last_colon && last_colon[1] && strspn(last_colon + 1, "0123456789") == strlen(last_colon + 1)) {
+        // There is a port
+        size_t len = last_colon - input;
+        if (len >= address_size) return -1;
+        strncpy(address, input, len);
+        address[len] = '\0';
+        *port = atoi(last_colon + 1);
+        return 0;
+    }
+
+    // Otherwise, whole input is address
+    if (strlen(input) >= address_size) return -1;
+    strcpy(address, input);
+    *port = -1;
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -103,8 +144,7 @@ int main(int argc, char *argv[]) {
 	memset(iv, 0, sizeof(iv));
 	strcpy(iv, "1234567890abcdef");
 	if (argc == 1) {
-		printf(
-				"proc -l [adress:]port -r [adress:]port  [-a passwd] [-b passwd]\n");
+		printf("proc -l [adress:]port -r [adress:]port  [-a passwd] [-b passwd]\n");
 		return -1;
 	}
 	int no_l = 1, no_r = 1;
@@ -112,20 +152,20 @@ int main(int argc, char *argv[]) {
 		switch (opt) {
 		case 'l':
 			no_l = 0;
-			if (strchr(optarg, ':') != 0) {
-				sscanf(optarg, "%[^:]:%d", local_address, &local_port);
+
+			if (parse_addr_port(optarg, local_address, sizeof(local_address), &local_port) == 0) {
+				fprintf(stderr, "local %s -> %s:%d\n", optarg, local_address, local_port);
 			} else {
-				strcpy(local_address, "::1");
-				sscanf(optarg, "%d", &local_port);
+				printf("error parsing local address:port\n");
 			}
 			break;
 		case 'r':
 			no_r = 0;
-			if (strchr(optarg, ':') != 0) {
-				sscanf(optarg, "%[^:]:%d", remote_address, &remote_port);
+
+			if (parse_addr_port(optarg, remote_address, sizeof(remote_address), &remote_port) == 0) {
+				fprintf(stderr, "remote %s -> %s:%d\n", optarg, remote_address, remote_port);
 			} else {
-				strcpy(remote_address, "::1");
-				sscanf(optarg, "%d", &remote_port);
+				printf("error parsing remote address:port\n");
 			}
 			break;
 		case 'a':
